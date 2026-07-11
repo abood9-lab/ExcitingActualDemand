@@ -17,6 +17,7 @@ const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
 
 let _baseUrl: string | null = null;
 let _authTokenGetter: AuthTokenGetter | null = null;
+let _onUnauthorized: (() => Promise<string | null>) | null = null;
 
 /**
  * Set a base URL that is prepended to every relative request URL
@@ -42,6 +43,18 @@ export function setBaseUrl(url: string | null): void {
  */
 export function setAuthTokenGetter(getter: AuthTokenGetter | null): void {
   _authTokenGetter = getter;
+}
+
+/**
+ * Register a callback that is invoked on a 401 Unauthorized response.
+ * The callback should attempt a token refresh and return the new token,
+ * or null if the refresh failed.  When a new token is returned, the
+ * original request is retried once with the updated Authorization header.
+ */
+export function setOnUnauthorized(
+  handler: (() => Promise<string | null>) | null,
+): void {
+  _onUnauthorized = handler;
 }
 
 function isRequest(input: RequestInfo | URL): input is Request {
@@ -360,7 +373,16 @@ export async function customFetch<T = unknown>(
 
   const requestInfo = { method, url: resolveUrl(input) };
 
-  const response = await fetch(input, { ...init, method, headers });
+  let response = await fetch(input, { ...init, method, headers });
+
+  // On 401, attempt a token refresh then retry once
+  if (response.status === 401 && _onUnauthorized) {
+    const newToken = await _onUnauthorized();
+    if (newToken) {
+      headers.set("authorization", `Bearer ${newToken}`);
+      response = await fetch(input, { ...init, method, headers });
+    }
+  }
 
   if (!response.ok) {
     const errorData = await parseErrorBody(response, method);
